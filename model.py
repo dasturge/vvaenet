@@ -17,7 +17,7 @@ import torch.nn.functional as F
 
 class ResBlock(nn.Module):
 
-    def __init__(self, block_channels, kernel_size=3, activation=nn.ReLU,
+    def __init__(self, block_channels, kernel_size=3, activation=F.relu,
                  regularization=nn.GroupNorm, n_groups=1, imdim=2):
         super().__init__()
         self.channels = block_channels
@@ -63,15 +63,15 @@ class ResBlock(nn.Module):
 
 class Encoder(nn.Module):
 
-    def __init__(self, n_levels=4, input_channels=1, initial_channels=16,
-                 blocks_per_level=None, kernel_size=3, activation=nn.ReLU,
+    def __init__(self, n_levels=4, input_channels=3, initial_channels=32,
+                 blocks_per_level=None, kernel_size=3, activation=F.relu,
                  regularization=nn.GroupNorm, n_groups=1, imdim=2):
         super().__init__()
         self.n_levels = n_levels
         self.activation = activation
         self.kernel_size = kernel_size
         self.regularization = regularization
-        self.n_groups = 1
+        self.n_groups = n_groups
         if blocks_per_level is None:
             self.blocks_per_level = [1] + [2] * (n_levels - 2) + [4]
         if imdim == 2:
@@ -102,6 +102,7 @@ class Encoder(nn.Module):
             self.sequence.append('skip_connect')
             strided_conv = Conv(in_channels=n_channels,
                                 out_channels=2 * n_channels,
+                                kernel_size=self.kernel_size,
                                 stride=2)
             n_channels = 2 * n_channels
             self.sequence.append(strided_conv)
@@ -120,9 +121,9 @@ class Encoder(nn.Module):
 
 class VAEDecoder(nn.Module):
 
-    def __init__(self, n_levels=4, input_volume=10, input_channels=256,
+    def __init__(self, n_levels=4, input_size=10, input_channels=256,
                  output_channels=1, initial_channels=16, latent_size = 128,
-                 blocks_per_level=None, kernel_size=3, activation=nn.ReLU,
+                 blocks_per_level=None, kernel_size=3, activation=F.relu,
                  regularization=nn.GroupNorm, n_groups=1, imdim=2):
         super().__init__()
         self.kernel_size = kernel_size
@@ -140,17 +141,20 @@ class VAEDecoder(nn.Module):
             raise ValueError('imdim must be 2 or 3')
 
         self.sequence = []
-        self.group_norm = nn.GroupNorm(num_groups=self.n_groups)
+        self.group_norm = nn.GroupNorm(num_groups=self.n_groups,
+                                       num_channels=input_channels)
         self.initial_conv = Conv(in_channels=input_channels,
                                  out_channels=initial_channels,
                                  kernel_size=self.kernel_size,
-                                 padding=kernel_size - 2)
-        self.dense = nn.Linear(in_features=input_volume // 2,
+                                 padding=kernel_size - 2,
+                                 stride=2)
+        self.dense = nn.Linear(in_features=initial_channels * input_size
+                                           // (2 ** imdim),
                                out_features=2 * self.latent_size)
 
         self.upsample = partial(F.interpolate, mode='bilinear',
                                 align_corners=True)
-        n_channels = initial_channels
+        n_channels = 2 * self.latent_size
         for i in range(n_levels):
             conv1 = Conv(in_channels=n_channels,
                          out_channels=n_channels // 2,
@@ -181,9 +185,10 @@ class VAEDecoder(nn.Module):
         out = self.activation(out)
         iconv = self.initial_conv(out)
         latent_dist = self.dense(iconv.view(-1))
-        mu = latent_dist[:self.latent]
+        mu = latent_dist[:self.latent_size]
         logvar = latent_dist[self.latent_size:]
         out = mu + self.sample(logvar)
+        out = out.view(-1, 1, 1, 1)
         for layer in self.sequence:
             out = layer(out)
         return out, mu, logvar
@@ -193,12 +198,13 @@ class SemanticDecoder(nn.Module):
 
     def __init__(self, n_levels=3, input_volume=10, input_channels=256,
                  output_channels=1,
-                 blocks_per_level=None, kernel_size=3, activation=nn.ReLU,
-                 regularization=nn.GroupNorm, imdim=2):
+                 blocks_per_level=None, kernel_size=3, activation=F.relu,
+                 regularization=nn.GroupNorm, n_groups=1, imdim=2):
         super().__init__()
         self.kernel_size = kernel_size
         self.activation = activation
         self.regularization = regularization
+        self.n_groups = n_groups
         if blocks_per_level is None:
             blocks_per_level = [1] * n_levels
         if imdim == 2:
@@ -240,20 +246,20 @@ class SemanticDecoder(nn.Module):
                 continue
             out = layer(out)
         out = self.final_conv(out)
-        out = F.softmax(out, dim=0)
+        out = F.softmax(out, dim=1)
         return out
 
 
 class UVAENet(nn.Module):
 
-    def __init__(self):
+    def __init__(self, vae_config={}):
         super().__init__()
         self.encoder = Encoder()
-        self.vae_decoder = VAEDecoder()
+        self.vae_decoder = VAEDecoder(**vae_config)
         self.semantic_decoder = SemanticDecoder()
 
     def forward(self, X):
         Z, skips = self.encoder(X)
-        Y, latent = self.vae_decoder(Z)
+        Y, mu, logvar = self.vae_decoder(Z)
         S = self.semantic_decoder(Z, skips)
-        return S, (Y, latent)
+        return S, (Y, mu, logvar)
