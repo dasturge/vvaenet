@@ -10,6 +10,8 @@ UVAENet: constructor for creating full network
 """
 from functools import partial
 
+import numpy as np
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -121,8 +123,8 @@ class Encoder(nn.Module):
 
 class VAEDecoder(nn.Module):
 
-    def __init__(self, n_levels=4, input_size=10, input_channels=256,
-                 output_channels=1, initial_channels=16, latent_size = 128,
+    def __init__(self, n_levels=4, input_shape=(10, 10), input_channels=256,
+                 output_channels=1, initial_channels=16, latent_size=128,
                  blocks_per_level=None, kernel_size=3, activation=F.relu,
                  regularization=nn.GroupNorm, n_groups=1, imdim=2):
         super().__init__()
@@ -130,6 +132,7 @@ class VAEDecoder(nn.Module):
         self.activation = activation
         self.regularization = regularization
         self.latent_size = latent_size
+        self.input_shape = input_shape
         self.n_groups = n_groups
         if blocks_per_level is None:
             blocks_per_level = [1] * n_levels
@@ -148,12 +151,20 @@ class VAEDecoder(nn.Module):
                                  kernel_size=self.kernel_size,
                                  padding=kernel_size - 2,
                                  stride=2)
-        self.dense = nn.Linear(in_features=initial_channels * input_size
-                                           // (2 ** imdim),
-                               out_features=2 * self.latent_size)
-
+        self.dense_to_latent = nn.Linear(
+            in_features=initial_channels * np.product(input_shape)
+                        // (2 ** imdim),
+            out_features=2 * self.latent_size)
+        self.dense = nn.Linear(
+            in_features=self.latent_size,
+            out_features=initial_channels * np.product(input_shape)
+                        // (2 ** imdim))
+        self.second_conv = Conv(in_channels=initial_channels,
+                                out_channels=input_channels,
+                                kernel_size=self.kernel_size,
+                                padding=kernel_size - 2)
         self.upsample = partial(F.interpolate, mode='bilinear',
-                                align_corners=True)
+                                align_corners=True, scale_factor=2)
         n_channels = 2 * self.latent_size
         for i in range(n_levels):
             conv1 = Conv(in_channels=n_channels,
@@ -161,7 +172,7 @@ class VAEDecoder(nn.Module):
                          kernel_size=1)
             self.sequence.append(conv1)
             self.sequence.append(self.upsample)
-            n_channels = 2 * n_channels
+            n_channels = n_channels // 2
             for j in range(blocks_per_level[i]):
                 resblock = ResBlock(block_channels=n_channels,
                                     kernel_size=3,
@@ -169,11 +180,11 @@ class VAEDecoder(nn.Module):
                                     regularization=self.regularization,
                                     n_groups=self.n_groups)
                 self.sequence.append(resblock)
-            self.final_conv = Conv(in_channels=n_channels,
-                                   out_channels=output_channels,
-                                   kernel_size=self.kernel_size,
-                                   padding=kernel_size - 2)
-            self.sequence.append(self.final_conv)
+        self.final_conv = Conv(in_channels=n_channels,
+                                out_channels=output_channels,
+                                kernel_size=self.kernel_size,
+                                padding=kernel_size - 2)
+        self.sequence.append(self.final_conv)
 
     def sample(self, logvar):
         std = torch.exp(0.5 * logvar)
@@ -184,11 +195,15 @@ class VAEDecoder(nn.Module):
         out = self.group_norm(Z)
         out = self.activation(out)
         iconv = self.initial_conv(out)
-        latent_dist = self.dense(iconv.view(-1))
+        latent_dist = self.dense_to_latent(iconv.view(-1))
         mu = latent_dist[:self.latent_size]
         logvar = latent_dist[self.latent_size:]
         out = mu + self.sample(logvar)
-        out = out.view(-1, 1, 1, 1)
+        out = self.dense(out)
+        out = self.activation(out)
+        out = out.view(1, -1, *(i // 2 for i in self.input_shape))
+        out = self.second_conv(out)
+        out = self.upsample(out)
         for layer in self.sequence:
             out = layer(out)
         return out, mu, logvar
@@ -216,7 +231,7 @@ class SemanticDecoder(nn.Module):
 
         self.sequence = []
         self.upsample = partial(F.interpolate, mode='bilinear',
-                                align_corners=True)
+                                align_corners=True, scale_factor=2)
         n_channels = input_channels
         for i in range(n_levels):
             conv1 = Conv(in_channels=n_channels,
@@ -252,11 +267,20 @@ class SemanticDecoder(nn.Module):
 
 class UVAENet(nn.Module):
 
-    def __init__(self, vae_config={}):
+    def __init__(self, input_shape, encoder_config=None, vae_config=None,
+                 semantic_config=None):
         super().__init__()
-        self.encoder = Encoder()
+        if encoder_config is None:
+            encoder_config = {}
+        if vae_config is None:
+            vae_config = {}
+        if semantic_config is None:
+            semantic_config = {}
+        self.encoder = Encoder(**encoder_config)
+        bottleneck, *_ = self.encoder(torch.zeros(input_shape))
+        vae_config['input_shape'] = bottleneck.shape[2:]
         self.vae_decoder = VAEDecoder(**vae_config)
-        self.semantic_decoder = SemanticDecoder()
+        self.semantic_decoder = SemanticDecoder(**semantic_config)
 
     def forward(self, X):
         Z, skips = self.encoder(X)

@@ -18,7 +18,7 @@ def read_data(paths, dtype=None, norm=False):
     images = []
     for p in paths:
         img = Image.open(p)
-        img = F.center_crop(img, (500, 500))
+        img = F.center_crop(img, (384, 384))
         img = np.asarray(img)
         if dtype:
             img = img.astype(dtype)
@@ -41,7 +41,7 @@ def main():
 
     X = read_data(jpegs, norm=True)
     y = read_data(segs)
-    net = model.UVAENet(vae_config={'initial_channels': 4, 'input_size': 62 * 62})
+    net = model.UVAENet(X[0].shape, vae_config={'initial_channels': 4})
     train.train(net, X, y, epochs=1)
 
 
