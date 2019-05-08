@@ -24,6 +24,11 @@ def read_data(paths, dtype=None, norm=False):
             img = img.astype(dtype)
         if norm:
             img = img / 255
+        else:
+            # binarize labels
+            img = np.apply_along_axis(
+                lambda x: x != np.array([0, 0, 254]),
+                arr=img, axis=-1).astype(int)
         img = torch.Tensor(img).permute(2, 0, 1).unsqueeze(0)
         images.append(img)
     return images
@@ -41,7 +46,9 @@ def main():
 
     X = read_data(jpegs, norm=True)
     y = read_data(segs)
-    net = model.UVAENet(X[0].shape, vae_config={'initial_channels': 4})
+    net = model.UVAENet(X[0].shape, encoder_config={'input_channels': 3},
+                        vae_config={'initial_channels': 4},
+                        semantic_config={'output_channels': 3})
     train.train(net, X, y, epochs=1)
 
 

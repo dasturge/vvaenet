@@ -65,7 +65,7 @@ class ResBlock(nn.Module):
 
 class Encoder(nn.Module):
 
-    def __init__(self, n_levels=4, input_channels=3, initial_channels=32,
+    def __init__(self, n_levels=4, input_channels=1, initial_channels=32,
                  blocks_per_level=None, kernel_size=3, activation=F.relu,
                  regularization=nn.GroupNorm, n_groups=1, imdim=2):
         super().__init__()
@@ -105,7 +105,8 @@ class Encoder(nn.Module):
             strided_conv = Conv(in_channels=n_channels,
                                 out_channels=2 * n_channels,
                                 kernel_size=self.kernel_size,
-                                stride=2)
+                                stride=2,
+                                padding=self.kernel_size - 2)
             n_channels = 2 * n_channels
             self.sequence.append(strided_conv)
 
@@ -123,7 +124,7 @@ class Encoder(nn.Module):
 
 class VAEDecoder(nn.Module):
 
-    def __init__(self, n_levels=4, input_shape=(10, 10), input_channels=256,
+    def __init__(self, n_levels=3, input_shape=(10, 10), input_channels=256,
                  output_channels=1, initial_channels=16, latent_size=128,
                  blocks_per_level=None, kernel_size=3, activation=F.relu,
                  regularization=nn.GroupNorm, n_groups=1, imdim=2):
@@ -211,8 +212,7 @@ class VAEDecoder(nn.Module):
 
 class SemanticDecoder(nn.Module):
 
-    def __init__(self, n_levels=3, input_volume=10, input_channels=256,
-                 output_channels=1,
+    def __init__(self, n_levels=3, input_channels=256, output_channels=1,
                  blocks_per_level=None, kernel_size=3, activation=F.relu,
                  regularization=nn.GroupNorm, n_groups=1, imdim=2):
         super().__init__()
@@ -240,7 +240,7 @@ class SemanticDecoder(nn.Module):
             self.sequence.append(conv1)
             self.sequence.append(self.upsample)
             self.sequence.append('skip_connect')
-            n_channels = 2 * n_channels
+            n_channels = n_channels // 2
             for j in range(blocks_per_level[i]):
                 resblock = ResBlock(block_channels=n_channels,
                                     kernel_size=3,
