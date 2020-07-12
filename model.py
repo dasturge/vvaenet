@@ -364,4 +364,5 @@ class UVAENet(nn.Module):
         Z, skips = self.encoder(X)
         Y, mu, logvar = self.vae_decoder(Z)
         S = self.semantic_decoder(Z, skips)
+        # P = torch.argmax(S, dim=1)
         return S, Y, mu, logvar
