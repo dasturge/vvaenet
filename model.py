@@ -281,8 +281,15 @@ class SemanticDecoder(nn.Module):
         regularization=nn.GroupNorm,
         n_groups=1,
         imdim=2,
+        activation="sigmoid",
     ):
         super().__init__()
+        if activation == "sigmoid":
+            self.activation = nn.Sigmoid()
+        elif activation == "softmax":
+            self.activation = nn.Softmax(dim=1)
+        else:
+            raise ValueError("activation %s not supported" % activation)
         self.kernel_size = kernel_size
         self.activation = activation
         self.regularization = regularization
@@ -335,7 +342,7 @@ class SemanticDecoder(nn.Module):
             if hasattr(layer, "is_skip_connection"):
                 out = out + skip_connections.pop()
         out = self.final_conv(out)
-        out = F.softmax(out, dim=1)
+        out = self.activation(out)
         return out
 
 

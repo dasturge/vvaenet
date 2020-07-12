@@ -199,7 +199,11 @@ def main():
         train_dataset[0]["image"].shape,
         encoder_config={"input_channels": input_channels, "imdim": 3,},
         vae_config={"initial_channels": 4, "imdim": 3,},
-        semantic_config={"output_channels": output_channels - 1, "imdim": 3,},
+        semantic_config={
+            "output_channels": output_channels - 1,
+            "imdim": 3,
+            "activation": "sigmoid",
+        },
     )
 
     # base_module = UNet3D(
