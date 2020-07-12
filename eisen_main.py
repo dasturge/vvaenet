@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 from eisen.datasets import MSDDataset
 from eisen.ops.losses import DiceLoss
 from eisen.io import LoadNiftiFromFilename
@@ -26,6 +28,11 @@ from model import UVAENet
 from losses import KLDivergence
 
 
+class DeepCopy:
+    def __call__(self, data):
+        return deepcopy(data)
+
+
 def main():
 
     # Defining some constants
@@ -39,6 +46,7 @@ def main():
 
     # create a transform to manipulate and load data
     # image manipulation transforms
+    deepcopy_tform = DeepCopy()
     read_tform = LoadNiftiFromFilename(["image", "label"], PATH_DATA)
     resample_tform = ResampleNiftiVolumes(["image", "label"], [1.0, 1.0, 1.0], "linear")
 
@@ -55,6 +63,7 @@ def main():
 
     tform = Compose(
         [
+            deepcopy_tform,
             read_tform,
             resample_tform,
             image_to_numpy_tform,
