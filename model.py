@@ -9,6 +9,7 @@ SemanticDecoder: upsamples bottleneck into softmax classes
 UVAENet: constructor for creating full network
 """
 from functools import partial
+from typing import final
 
 import numpy as np
 
@@ -281,15 +282,15 @@ class SemanticDecoder(nn.Module):
         regularization=nn.GroupNorm,
         n_groups=1,
         imdim=2,
-        activation="sigmoid",
+        final_activation="sigmoid",
     ):
         super().__init__()
-        if activation == "sigmoid":
-            self.activation = nn.Sigmoid()
-        elif activation == "softmax":
-            self.activation = nn.Softmax(dim=1)
+        if final_activation == "sigmoid":
+            self.final_activation = nn.Sigmoid()
+        elif final_activation == "softmax":
+            self.final_activation = nn.Softmax(dim=1)
         else:
-            raise ValueError("activation %s not supported" % activation)
+            raise ValueError("activation %s not supported" % final_activation)
         self.kernel_size = kernel_size
         self.activation = activation
         self.regularization = regularization
@@ -342,7 +343,7 @@ class SemanticDecoder(nn.Module):
             if hasattr(layer, "is_skip_connection"):
                 out = out + skip_connections.pop()
         out = self.final_conv(out)
-        out = self.activation(out)
+        out = self.final_activation(out)
         return out
 
 

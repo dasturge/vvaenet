@@ -202,7 +202,7 @@ def main():
         semantic_config={
             "output_channels": output_channels - 1,
             "imdim": 3,
-            "activation": "sigmoid",
+            "final_activation": "sigmoid",
         },
     )
 
