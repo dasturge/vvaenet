@@ -53,8 +53,8 @@ def main():
     # image manipulation transforms
     deepcopy_tform = DeepCopy()
     read_tform = LoadNiftiFromFilename(["image", "label"], PATH_DATA)
-    image_resample_tform = ResampleNiftiVolumes(["image"], [2.0, 2.0, 2.0], "linear")
-    label_resample_tform = ResampleNiftiVolumes(["label"], [2.0, 2.0, 2.0], "nearest")
+    image_resample_tform = ResampleNiftiVolumes(["image"], [2.5, 2.5, 2.5], "linear")
+    label_resample_tform = ResampleNiftiVolumes(["label"], [2.5, 2.5, 2.5], "nearest")
 
     image_to_numpy_tform = NiftiToNumpy(["image"], multichannel=True)
     label_to_numpy_tform = NiftiToNumpy(["label"])
@@ -66,11 +66,11 @@ def main():
     map_intensities = MapValues(["image"], min_value=0.0, max_value=1.0)
 
     rename_fields = RenameFields(["label"], ["one_hot"])
-    one_hotify = OneHotify(["one_hot"], num_classes=output_channels)
-    transpose = Transpose(["one_hot"], [3, 0, 1, 2])
-    remove_channel = RemoveChannel(["one_hot"])
-
-    # threshold_labels = ThresholdValues(["label"], threshold=0.5)
+    one_hotify = OneHotify(["label"], num_classes=output_channels)
+    transpose = Transpose(["label"], [3, 0, 1, 2])
+    remove_channel = RemoveChannel(["label"])
+    add_channel_dimension = AddChannelDimension(["label"])
+    threshold_labels = ThresholdValues(["label"], threshold=0.5)
 
     tform = Compose(
         [
@@ -82,10 +82,12 @@ def main():
             label_to_numpy_tform,
             crop,
             map_intensities,
-            rename_fields,
-            one_hotify,
-            transpose,
-            remove_channel,
+            #rename_fields,
+            #one_hotify,
+            #transpose,
+            #remove_channel,
+            add_channel_dimension,
+            threshold_labels,
         ]
     )
 
@@ -114,17 +116,17 @@ def main():
         encoder_config={"input_channels": input_channels, "imdim": 3,},
         vae_config={"initial_channels": 4, "imdim": 3,},
         semantic_config={
-            "output_channels": output_channels - 1,
+            "output_channels": 1, # output_channels - 1,
             "imdim": 3,
             "final_activation": "sigmoid",
         },
     )
 
-    # base_module = UNet3D(
-    #    input_channels=input_channels,
-    #    output_channels=output_channels,
-    #    outputs_activation="softmax",
-    # )
+    base_module = UNet3D(
+       input_channels=input_channels,
+       output_channels=1,
+       outputs_activation="sigmoid",
+    )
     if torch.cuda.device_count() > 1:
         base_module = nn.DataParallel(base_module)
 
@@ -136,7 +138,7 @@ def main():
 
     dice_loss = EisenLossWrapper(
         module=DiceLoss(),
-        input_names=["one_hot", "segmentation"],
+        input_names=["label", "segmentation"],
         output_names=["dice_loss"],
         weight=1.0,
     )
@@ -155,7 +157,7 @@ def main():
 
     metric = EisenModuleWrapper(
         module=DiceMetric(),
-        input_names=["one_hot", "segmentation"],
+        input_names=["segmentation", "label"],
         output_names=["dice_metric"],
     )
 
@@ -163,7 +165,7 @@ def main():
 
     training = Training(
         model=model,
-        losses=[dice_loss, reconstruction_loss, kl_loss],
+        losses=[dice_loss], # , reconstruction_loss, kl_loss],
         data_loader=data_loader_train,
         optimizer=optimizer,
         metrics=[metric],
