@@ -14,8 +14,7 @@ from eisen.ops.losses import DiceLoss
 from eisen.ops.metrics import DiceMetric
 from eisen.utils import EisenModuleWrapper
 from eisen.utils.workflows import Training, Testing
-from eisen.utils.logging.logs import LoggingHook
-from torch import mul
+from eisen.utils.logging import LoggingHook, TensorboardSummaryHook
 
 import torch.nn as nn
 from torchvision.transforms import Compose
@@ -35,7 +34,7 @@ def main():
     NAME_MSD_JSON = "dataset.json"
 
     NUM_EPOCHS = 100
-    BATCH_SIZE = 1
+    BATCH_SIZE = 32
 
     # create a transform to manipulate and load data
     # image manipulation transforms
@@ -128,6 +127,9 @@ def main():
     )
     train_hook = LoggingHook(training.id, "Training", "./")
     test_hook = LoggingHook(testing.id, "Testing", "./")
+    train_board = TensorboardSummaryHook(training.id, "Training", "./tensorboard")
+    test_board = TensorboardSummaryHook(testing.id, "Testing", "./tensorboard")
+
     # run optimization for NUM_EPOCHS
     for i in range(NUM_EPOCHS):
         training.run()
