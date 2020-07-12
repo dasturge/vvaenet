@@ -6,7 +6,6 @@ from eisen.models.segmentation import UNet3D
 from eisen.datasets import MSDDataset
 from eisen.ops.losses import DiceLoss
 from eisen.io import LoadNiftiFromFilename
-from eisen.ops.losses import dice
 from eisen.transforms import (
     ResampleNiftiVolumes,
     NiftiToNumpy,
@@ -17,13 +16,14 @@ from eisen.transforms import (
 )
 from eisen.ops.losses import DiceLoss
 from eisen.ops.metrics import DiceMetric
+from eisen.transforms.imaging import RenameFields
 from eisen.utils import EisenModuleWrapper, EisenDatasetSplitter
 from eisen.utils.workflows import Training, Testing
 from eisen.utils.logging import LoggingHook, TensorboardSummaryHook
 
+import numpy as np
 import torch
 import torch.nn as nn
-from torch.nn.functional import interpolate
 from torchvision.transforms import Compose
 from torch.utils.data import DataLoader
 from torch.optim import Adam
@@ -35,6 +35,78 @@ from losses import KLDivergence
 class DeepCopy:
     def __call__(self, data):
         return deepcopy(data)
+
+
+class CopyFields:
+    """
+    Transform allowing to copy fields in the data dictionary, performs a deepcopy operation
+
+    .. code-block:: python
+
+        from eisen.transforms import CopyFields
+        tform = CopyFields(['old_name1', 'old_name2'], ['new_name1', 'new_name2'])
+        tform = tform(data)
+
+    """
+
+    def __init__(self, fields, new_fields):
+        """
+        :param fields: list of names of the fields of data dictionary to copy
+        :type fields: list of str
+        :param new_fields: new field names for the data dictionary
+        :type new_fields: list of str
+
+        .. code-block:: python
+
+            from eisen.transforms import CopyFields
+
+            tform = CopyFields(
+                fields=['old_name1', 'old_name2'],
+                new_fields=['new_name1', 'new_name2']
+            )
+
+        <json>
+        [
+            {"name": "fields", "type": "list:string", "value": ""},
+            {"name": "new_fields", "type": "list:string", "value": ""}
+        ]
+        </json>
+        """
+        self.fields = fields
+        self.new_fields = new_fields
+
+        assert len(self.new_fields) == len(self.fields)
+
+    def __call__(self, data):
+        for field, new_field in zip(self.fields, self.new_fields):
+            data[new_field] = deepcopy(data[field])
+
+        return data
+
+
+class OneHotify:
+    def __init__(self, fields, num_classes=None, dtype=np.float) -> None:
+        self.fields = fields
+        self.num_classes = num_classes
+        self.dtype = dtype
+
+    def __call__(self, data):
+        for field in self.fields:
+            x = np.asarray(data[field], dtype=np.int)
+            n = np.max(x) + 1 if self.num_classes is None else self.num_classes
+            data[field] = np.eye(n, dtype=self.dtype)[x]
+        return data
+
+
+class Transpose:
+    def __init__(self, fields, order) -> None:
+        self.fields = fields
+        self.order = order
+
+    def __call__(self, data):
+        for field in self.fields:
+            data[field] = data[field].transpose(self.order)
+        return data
 
 
 def main():
@@ -69,7 +141,11 @@ def main():
 
     map_intensities = MapValues(["image"], min_value=0.0, max_value=1.0)
 
-    threshold_labels = ThresholdValues(["label"], threshold=0.5)
+    rename_fields = RenameFields(["label"], ["one_hot"])
+    one_hotify = OneHotify(["one_hot"], num_classes=output_channels)
+    transpose = Transpose(["one_hot"], [3, 0, 1, 2])
+
+    # threshold_labels = ThresholdValues(["label"], threshold=0.5)
 
     tform = Compose(
         [
@@ -81,8 +157,9 @@ def main():
             label_to_numpy_tform,
             crop,
             map_intensities,
-            threshold_labels,
-            add_channel,
+            rename_fields,
+            one_hotify,
+            transpose,
         ]
     )
 
@@ -113,23 +190,23 @@ def main():
         semantic_config={"output_channels": output_channels, "imdim": 3,},
     )
 
-    base_module = UNet3D(
-        input_channels=input_channels,
-        output_channels=output_channels,
-        outputs_activation="softmax",
-    )
+    # base_module = UNet3D(
+    #    input_channels=input_channels,
+    #    output_channels=output_channels,
+    #    outputs_activation="softmax",
+    # )
     if torch.cuda.device_count() > 1:
         base_module = nn.DataParallel(base_module)
 
     model = EisenModuleWrapper(
         module=base_module,
         input_names=["image"],
-        output_names=["segmentation"],  #  "reconstruction", "mean", "log_variance"],
+        output_names=["segmentation", "reconstruction", "mean", "log_variance",],
     )
 
     dice_loss = EisenModuleWrapper(
         module=DiceLoss(),
-        input_names=["label", "segmentation"],
+        input_names=["one_hot", "segmentation"],
         output_names=["dice_loss"],
     )
     reconstruction_loss = EisenModuleWrapper(
@@ -145,7 +222,7 @@ def main():
 
     metric = EisenModuleWrapper(
         module=DiceMetric(),
-        input_names=["label", "segmentation"],
+        input_names=["one_hot", "segmentation"],
         output_names=["dice_metric"],
     )
 
@@ -153,7 +230,7 @@ def main():
 
     training = Training(
         model=model,
-        losses=[dice_loss],  # , reconstruction_loss, kl_loss],
+        losses=[dice_loss, reconstruction_loss, kl_loss],
         data_loader=data_loader_train,
         optimizer=optimizer,
         metrics=[metric],
