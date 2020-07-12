@@ -30,93 +30,7 @@ from torch.optim import Adam
 
 from model import Interpolate, UVAENet
 from losses import KLDivergence
-
-
-class DeepCopy:
-    def __call__(self, data):
-        return deepcopy(data)
-
-
-class CopyFields:
-    """
-    Transform allowing to copy fields in the data dictionary, performs a deepcopy operation
-
-    .. code-block:: python
-
-        from eisen.transforms import CopyFields
-        tform = CopyFields(['old_name1', 'old_name2'], ['new_name1', 'new_name2'])
-        tform = tform(data)
-
-    """
-
-    def __init__(self, fields, new_fields):
-        """
-        :param fields: list of names of the fields of data dictionary to copy
-        :type fields: list of str
-        :param new_fields: new field names for the data dictionary
-        :type new_fields: list of str
-
-        .. code-block:: python
-
-            from eisen.transforms import CopyFields
-
-            tform = CopyFields(
-                fields=['old_name1', 'old_name2'],
-                new_fields=['new_name1', 'new_name2']
-            )
-
-        <json>
-        [
-            {"name": "fields", "type": "list:string", "value": ""},
-            {"name": "new_fields", "type": "list:string", "value": ""}
-        ]
-        </json>
-        """
-        self.fields = fields
-        self.new_fields = new_fields
-
-        assert len(self.new_fields) == len(self.fields)
-
-    def __call__(self, data):
-        for field, new_field in zip(self.fields, self.new_fields):
-            data[new_field] = deepcopy(data[field])
-
-        return data
-
-
-class OneHotify:
-    def __init__(self, fields, num_classes=None, dtype=np.float) -> None:
-        self.fields = fields
-        self.num_classes = num_classes
-        self.dtype = dtype
-
-    def __call__(self, data):
-        for field in self.fields:
-            x = np.asarray(data[field], dtype=np.int)
-            n = np.max(x) + 1 if self.num_classes is None else self.num_classes
-            data[field] = np.eye(n, dtype=self.dtype)[x]
-        return data
-
-
-class Transpose:
-    def __init__(self, fields, order) -> None:
-        self.fields = fields
-        self.order = order
-
-    def __call__(self, data):
-        for field in self.fields:
-            data[field] = data[field].transpose(self.order)
-        return data
-
-
-class RemoveChannel:
-    def __init__(self, fields) -> None:
-        self.fields = fields
-
-    def __call__(self, data):
-        for field in self.fields:
-            data[field] = data[field][1:, ...]
-        return data
+from util import *
 
 
 def main():
@@ -220,20 +134,23 @@ def main():
         output_names=["segmentation", "reconstruction", "mean", "log_variance",],
     )
 
-    dice_loss = EisenModuleWrapper(
+    dice_loss = EisenLossWrapper(
         module=DiceLoss(),
         input_names=["one_hot", "segmentation"],
         output_names=["dice_loss"],
+        weight=1.0,
     )
-    reconstruction_loss = EisenModuleWrapper(
+    reconstruction_loss = EisenLossWrapper(
         module=nn.MSELoss(),
         input_names=["image", "reconstruction"],
         output_names=["reconstruction_loss"],
+        weight=0.1,
     )
-    kl_loss = EisenModuleWrapper(
+    kl_loss = EisenLossWrapper(
         module=KLDivergence(),
         input_names=["mean", "log_variance"],
         output_names=["kl_loss"],
+        weight=0.1,
     )
 
     metric = EisenModuleWrapper(
