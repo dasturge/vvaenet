@@ -2,6 +2,7 @@ import json
 import os
 from copy import deepcopy
 
+from eisen.models.segmentation import UNet3D
 from eisen.datasets import MSDDataset
 from eisen.ops.losses import DiceLoss
 from eisen.io import LoadNiftiFromFilename
@@ -111,13 +112,19 @@ def main():
         vae_config={"initial_channels": 4, "imdim": 3,},
         semantic_config={"output_channels": output_channels, "imdim": 3,},
     )
+
+    base_module = UNet3D(
+        input_channels=input_channels,
+        output_channels=output_channels,
+        outputs_activation="softmax",
+    )
     if torch.cuda.device_count() > 1:
         base_module = nn.DataParallel(base_module)
 
     model = EisenModuleWrapper(
         module=base_module,
         input_names=["image"],
-        output_names=["segmentation", "reconstruction", "mean", "log_variance"],
+        output_names=["segmentation"],  #  "reconstruction", "mean", "log_variance"],
     )
 
     dice_loss = EisenModuleWrapper(
@@ -146,7 +153,7 @@ def main():
 
     training = Training(
         model=model,
-        losses=[dice_loss, reconstruction_loss, kl_loss],
+        losses=[dice_loss],  # , reconstruction_loss, kl_loss],
         data_loader=data_loader_train,
         optimizer=optimizer,
         metrics=[metric],
