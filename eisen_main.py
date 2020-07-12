@@ -42,7 +42,7 @@ def main():
     NAME_MSD_JSON = "dataset.json"
 
     NUM_EPOCHS = 100
-    BATCH_SIZE = 32
+    BATCH_SIZE = 16
 
     # create a transform to manipulate and load data
     # image manipulation transforms
