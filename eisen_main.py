@@ -1,3 +1,5 @@
+import json
+import os
 from copy import deepcopy
 
 from eisen.datasets import MSDDataset
@@ -20,11 +22,12 @@ from eisen.utils.logging import LoggingHook, TensorboardSummaryHook
 
 import torch
 import torch.nn as nn
+from torch.nn.functional import interpolate
 from torchvision.transforms import Compose
 from torch.utils.data import DataLoader
 from torch.optim import Adam
 
-from model import UVAENet
+from model import Interpolate, UVAENet
 from losses import KLDivergence
 
 
@@ -41,14 +44,20 @@ def main():
 
     NAME_MSD_JSON = "dataset.json"
 
+    with open(os.path.join(PATH_DATA, NAME_MSD_JSON)) as fd:
+        msd_metadata = json.load(fd)
+    input_channels = len(msd_metadata["modality"])
+    output_channels = len(msd_metadata["labels"])
+
     NUM_EPOCHS = 100
-    BATCH_SIZE = 32
+    BATCH_SIZE = 16
 
     # create a transform to manipulate and load data
     # image manipulation transforms
     deepcopy_tform = DeepCopy()
     read_tform = LoadNiftiFromFilename(["image", "label"], PATH_DATA)
-    resample_tform = ResampleNiftiVolumes(["image", "label"], [1.0, 1.0, 1.0], "linear")
+    image_resample_tform = ResampleNiftiVolumes(["image"], [2.0, 2.0, 2.0], "linear")
+    label_resample_tform = ResampleNiftiVolumes(["label"], [2.0, 2.0, 2.0], "nearest")
 
     image_to_numpy_tform = NiftiToNumpy(["image"], multichannel=True)
     label_to_numpy_tform = NiftiToNumpy(["label"])
@@ -65,7 +74,8 @@ def main():
         [
             deepcopy_tform,
             read_tform,
-            resample_tform,
+            image_resample_tform,
+            label_resample_tform,
             image_to_numpy_tform,
             label_to_numpy_tform,
             crop,
@@ -97,9 +107,9 @@ def main():
     )
     base_module = UVAENet(
         train_dataset[0]["image"].shape,
-        encoder_config={"input_channels": 4, "imdim": 3,},
+        encoder_config={"input_channels": input_channels, "imdim": 3,},
         vae_config={"initial_channels": 4, "imdim": 3,},
-        semantic_config={"output_channels": 2, "imdim": 3,},
+        semantic_config={"output_channels": output_channels, "imdim": 3,},
     )
     if torch.cuda.device_count() > 1:
         base_module = nn.DataParallel(base_module)
