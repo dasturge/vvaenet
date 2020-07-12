@@ -12,7 +12,7 @@ from eisen.transforms import (
 )
 from eisen.ops.losses import DiceLoss
 from eisen.ops.metrics import DiceMetric
-from eisen.utils import EisenModuleWrapper
+from eisen.utils import EisenModuleWrapper, EisenDatasetSplitter
 from eisen.utils.workflows import Training, Testing
 from eisen.utils.logging import LoggingHook, TensorboardSummaryHook
 
@@ -66,8 +66,16 @@ def main():
         ]
     )
 
-    train_dataset = MSDDataset(PATH_DATA, NAME_MSD_JSON, "training", transform=tform)
-    test_dataset = MSDDataset(PATH_DATA, NAME_MSD_JSON, "test", transform=tform)
+    # create a dataset from the training set of the MSD dataset
+    dataset = MSDDataset(PATH_DATA, NAME_MSD_JSON, "training", transform=None)
+
+    # define a splitter to do a 80%-20% split of the data
+    splitter = EisenDatasetSplitter(
+        0.8, 0.2, 0.0, transform_train=tform, transform_valid=tform
+    )
+
+    # define a training and test sets
+    train_dataset, test_dataset, _ = splitter(dataset)
 
     # create data loader for training, this functionality is pure pytorch
     data_loader_train = DataLoader(
