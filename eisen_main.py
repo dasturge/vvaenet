@@ -109,6 +109,16 @@ class Transpose:
         return data
 
 
+class RemoveChannel:
+    def __init__(self, fields) -> None:
+        self.fields = fields
+
+    def __call__(self, data):
+        for field in self.fields:
+            data[field] = data[field][1:, ...]
+        return data
+
+
 def main():
 
     # Defining some constants
@@ -144,6 +154,7 @@ def main():
     rename_fields = RenameFields(["label"], ["one_hot"])
     one_hotify = OneHotify(["one_hot"], num_classes=output_channels)
     transpose = Transpose(["one_hot"], [3, 0, 1, 2])
+    remove_channel = RemoveChannel(["one_hot"])
 
     # threshold_labels = ThresholdValues(["label"], threshold=0.5)
 
@@ -160,6 +171,7 @@ def main():
             rename_fields,
             one_hotify,
             transpose,
+            remove_channel,
         ]
     )
 
@@ -187,7 +199,7 @@ def main():
         train_dataset[0]["image"].shape,
         encoder_config={"input_channels": input_channels, "imdim": 3,},
         vae_config={"initial_channels": 4, "imdim": 3,},
-        semantic_config={"output_channels": output_channels, "imdim": 3,},
+        semantic_config={"output_channels": output_channels - 1, "imdim": 3,},
     )
 
     # base_module = UNet3D(
