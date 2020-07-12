@@ -16,6 +16,7 @@ from eisen.utils import EisenModuleWrapper
 from eisen.utils.workflows import Training, Testing
 from eisen.utils.logging import LoggingHook, TensorboardSummaryHook
 
+import torch
 import torch.nn as nn
 from torchvision.transforms import Compose
 from torch.utils.data import DataLoader
@@ -77,14 +78,17 @@ def main():
     data_loader_test = DataLoader(
         test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4
     )
+    base_module = UVAENet(
+        train_dataset[0]["image"].shape,
+        encoder_config={"input_channels": 4, "imdim": 3,},
+        vae_config={"initial_channels": 4, "imdim": 3,},
+        semantic_config={"output_channels": 2, "imdim": 3,},
+    )
+    if torch.cuda.device_count() > 1:
+        base_module = nn.DataParallel(base_module)
 
     model = EisenModuleWrapper(
-        module=UVAENet(
-            train_dataset[0]["image"].shape,
-            encoder_config={"input_channels": 4, "imdim": 3,},
-            vae_config={"initial_channels": 4, "imdim": 3,},
-            semantic_config={"output_channels": 2, "imdim": 3,},
-        ),
+        module=base_module,
         input_names=["image"],
         output_names=["segmentation", "reconstruction", "mean", "log_variance"],
     )
@@ -125,10 +129,10 @@ def main():
     testing = Testing(
         model=model, data_loader=data_loader_test, metrics=[metric], gpu=True
     )
-    train_hook = LoggingHook(training.id, "Training", "./")
-    test_hook = LoggingHook(testing.id, "Testing", "./")
-    train_board = TensorboardSummaryHook(training.id, "Training", "./tensorboard")
-    test_board = TensorboardSummaryHook(testing.id, "Testing", "./tensorboard")
+    train_hook = LoggingHook(training.id, "Training", PATH_ARTIFACTS)
+    test_hook = LoggingHook(testing.id, "Testing", PATH_ARTIFACTS)
+    train_board = TensorboardSummaryHook(training.id, "Training", PATH_ARTIFACTS)
+    test_board = TensorboardSummaryHook(testing.id, "Testing", PATH_ARTIFACTS)
 
     # run optimization for NUM_EPOCHS
     for i in range(NUM_EPOCHS):
