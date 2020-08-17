@@ -9,7 +9,6 @@ SemanticDecoder: upsamples bottleneck into softmax classes
 UVAENet: constructor for creating full network
 """
 from functools import partial
-from typing import final
 
 import numpy as np
 
@@ -27,14 +26,46 @@ class Interpolate(nn.Module):
         return F.interpolate(x, **self.kwargs)
 
 
+class GroupNorm3D(nn.Module):
+    def __init__(self, num_features, num_groups=16, eps=1e-5):
+        super(GroupNorm3D, self).__init__()
+        self.weight = nn.Parameter(torch.ones(1, num_features, 1, 1, 1))
+        self.bias = nn.Parameter(torch.zeros(1, num_features, 1, 1, 1))
+        self.num_groups = num_groups
+        self.eps = eps
+
+    def forward(self, x):
+        N, C, H, W, D = x.size()
+
+        G = self.num_groups
+
+        if C % G != 0:
+            while C % G != 0 and G > 0:
+                G -= 1
+            print(
+                "Warning: a GroupNorm3D operation was requested num_groups {} but had to use {} instead".format(
+                    self.num_groups, G
+                )
+            )
+            self.num_groups = G
+
+        x = x.view(N, G, -1)
+        mean = x.mean(-1, keepdim=True)
+        var = x.var(-1, keepdim=True)
+
+        x = (x - mean) / (var + self.eps).sqrt()
+        x = x.view(N, C, H, W, D)
+        return x * self.weight + self.bias
+
+
 class ResBlock(nn.Module):
     def __init__(
         self,
         block_channels,
         kernel_size=3,
-        activation=F.relu,
+        activation=nn.LeakyReLU(0.2),
         regularization=nn.GroupNorm,
-        n_groups=1,
+        n_groups=16,
         imdim=2,
     ):
         super().__init__()
@@ -45,6 +76,7 @@ class ResBlock(nn.Module):
             Conv = nn.Conv2d
         elif imdim == 3:
             Conv = nn.Conv3d
+            regularization = GroupNorm3D
         else:
             raise ValueError("imdim must be 2 or 3")
         self.padding = kernel_size - 2
@@ -52,7 +84,7 @@ class ResBlock(nn.Module):
         self.activation = activation
 
         self.regularization1 = regularization(
-            num_groups=self.n_groups, num_channels=self.channels
+            num_features=self.channels, num_groups=self.n_groups,
         )
         self.conv1 = Conv(
             in_channels=self.channels,
@@ -63,7 +95,7 @@ class ResBlock(nn.Module):
         )
 
         self.regularization2 = regularization(
-            num_groups=self.n_groups, num_channels=self.channels
+            num_features=self.channels, num_groups=self.n_groups,
         )
         self.conv2 = Conv(
             in_channels=self.channels,
@@ -93,7 +125,7 @@ class Encoder(nn.Module):
         initial_channels=32,
         blocks_per_level=None,
         kernel_size=3,
-        activation=F.relu,
+        activation=nn.LeakyReLU(0.2),
         regularization=nn.GroupNorm,
         n_groups=1,
         imdim=2,
@@ -169,7 +201,7 @@ class VAEDecoder(nn.Module):
         latent_size=128,
         blocks_per_level=None,
         kernel_size=3,
-        activation=F.relu,
+        activation=nn.LeakyReLU(0.2),
         regularization=nn.GroupNorm,
         n_groups=1,
         imdim=2,
@@ -203,9 +235,12 @@ class VAEDecoder(nn.Module):
             padding=kernel_size - 2,
             stride=2,
         )
+        shape = self.initial_conv(
+            torch.zeros(1, input_channels, *input_shape, requires_grad=False)
+        ).shape
+
         self.dense_to_latent = nn.Linear(
-            in_features=initial_channels * np.product(input_shape) // (2 ** imdim),
-            out_features=2 * self.latent_size,
+            in_features=np.product(shape), out_features=2 * self.latent_size,
         )
         self.dense = nn.Linear(
             in_features=self.latent_size,
@@ -278,7 +313,7 @@ class SemanticDecoder(nn.Module):
         output_channels=1,
         blocks_per_level=None,
         kernel_size=3,
-        activation=F.relu,
+        activation=nn.LeakyReLU(0.2),
         regularization=nn.GroupNorm,
         n_groups=1,
         imdim=2,
@@ -360,6 +395,7 @@ class UVAENet(nn.Module):
         if semantic_config is None:
             semantic_config = {}
         self.encoder = Encoder(**encoder_config)
+        self.dropout = nn.Dropout3d(p=0.2)
         bottleneck, *_ = self.encoder(
             torch.zeros(input_shape, device=next(self.parameters()).device)
         )
@@ -370,6 +406,7 @@ class UVAENet(nn.Module):
 
     def forward(self, X):
         Z, skips = self.encoder(X)
+        Z = self.dropout(Z)
         Y, mu, logvar = self.vae_decoder(Z)
         S = self.semantic_decoder(Z, skips)
         # P = torch.argmax(S, dim=1)

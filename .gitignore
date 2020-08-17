@@ -1,0 +1,13 @@
+.vscode
+__pycache__/
+Task01_BrainTumour
+Task02_Heart
+Task04_Hippocampus
+Task05_Prostate
+Task06_Lung
+Task07_Pancreas
+Task08_HepaticVessel
+Task09_Spleen
+Task10_Colon
+drive_keys.txt
+

@@ -1,26 +1,43 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+from eisen.ops.losses import DiceLoss
+from eisen.ops.metrics import DiceMetric
 
 
-def dice_loss(input, target):
-    smooth = 1.0
+class SingleDiceMetric(DiceMetric):
+    def __init__(self, class_index, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.class_index = class_index
 
-    iflat = input.view(-1)
-    tflat = target.contiguous().view(-1).float()
-    intersection = (iflat * tflat).sum()
+    def forward(self, predictions, labels):
+        predictions = predictions[:, self.class_index, ...]
+        labels = labels[:, self.class_index, ...]
+        return super().forward(predictions, labels)
 
-    return 1 - ((2.0 * intersection + smooth) / (iflat.sum() + tflat.sum() + smooth))
+
+class SingleDiceLoss(DiceLoss):
+    def __init__(self, class_index, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.class_index = class_index
+
+    def forward(self, predictions, labels):
+        predictions = predictions[:, self.class_index, ...].unsqueeze(1)
+        labels = labels[:, self.class_index, ...].unsqueeze(1)
+        return super().forward(predictions, labels)
 
 
 class KLDivergence(nn.Module):
+    def __init__(self, N) -> None:
+        super().__init__()
+        self.N = N
+
     def forward(self, mu, logvar):
-        kld_loss = torch.mean(
-            -0.5 * torch.sum(1 + logvar - mu ** 2 - logvar.exp(), dim=1), dim=0
+        kld_loss = (
+            torch.sum(
+                -0.5 * torch.sum(1 + logvar - mu ** 2 - logvar.exp(), dim=1), dim=0
+            )
+            / self.N
         )
         return kld_loss
 
-
-def l2_loss(x_recon, x):
-    l2_norm = torch.mean((x_recon - x).pow(2))
-    return l2_norm
