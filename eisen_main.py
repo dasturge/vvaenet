@@ -21,6 +21,7 @@ from eisen.ops.metrics import DiceMetric
 from eisen.utils import EisenModuleWrapper, EisenDatasetSplitter
 from eisen.utils.artifacts import SaveTorchModelHook
 from eisen.utils.workflows import Training
+from torch.optim import adam
 from torch.utils.data import DataLoader
 from torch.optim import Adam
 from torchvision.transforms import Compose
@@ -68,28 +69,34 @@ def run_decathalon_step(task_path, use_multiclass=True):
     NUM_EPOCHS = 100
     BATCH_SIZE = 4
 
-    MEMORY_LIMIT = 4 * 3932160 / 2
+    MEMORY_LIMIT = 4 * 3932160 / 8.0
     IMAGE_SIZE = original_size
     IMAGE_RESOLUTION = original_image_resolution
     factor = 1
 
+    timer = 0
     while input_channels * np.product(IMAGE_SIZE) > MEMORY_LIMIT:
+        timer += 1
         factor += 1
-        if factor == 2:
+        if factor <= 3:
             IMAGE_SIZE = [s // factor for s in original_size]
             IMAGE_SIZE = [
                 s + 16 - s % 16 if s % 16 else s for s in IMAGE_SIZE
             ]  # makes convolutions cleaner
             IMAGE_RESOLUTION = [r * factor for r in original_image_resolution]
         else:
-            IMAGE_SIZE = [s - 16 if s > 96 else s for s in original_size]
+            IMAGE_SIZE = [s - 16 if s > 82 else s for s in IMAGE_SIZE]
             IMAGE_RESOLUTION = [
-                r * round(s2 / s1)
+                r * round(s1 / s2)
                 for s1, s2, r in zip(
                     original_size, IMAGE_SIZE, original_image_resolution
                 )
             ]
-
+        if timer >= 10:
+            break
+    IMAGE_SIZE = [
+        s + 16 - s % 16 if s % 16 else s for s in IMAGE_SIZE
+    ]  # makes convolutions cleaner
     # image manipulation transforms
     deepcopy_tform = DeepCopy()
     read_tform = LoadNiftiFromFilename(["image", "label"], task_path)
@@ -104,9 +111,8 @@ def run_decathalon_step(task_path, use_multiclass=True):
 
     one_hotify = OneHotify(["label"], num_classes=output_channels)
     transpose = Transpose(["label"], [3, 0, 1, 2])
-    add_channel_dimension = AddChannelDimension(
-        ["label"] + (["image"] if output_channels > 2 else [])
-    )
+    add_channel_dimension = AddChannelDimension(["label"])
+    add_channel_dimension_input = AddChannelDimension(["image"])
     threshold_labels = ThresholdValues(["label"], threshold=0.5)
     tform_list = [
         deepcopy_tform,
@@ -122,6 +128,8 @@ def run_decathalon_step(task_path, use_multiclass=True):
         tform_list += [one_hotify, transpose]
     else:
         tform_list += [add_channel_dimension, threshold_labels]
+    if not multichannel:
+        tform_list += [add_channel_dimension_input]
     tform = Compose(tform_list)
 
     # create a dataset from the training set of the MSD dataset
@@ -238,11 +246,14 @@ def run_decathalon_step(task_path, use_multiclass=True):
 
     output_metadata = {
         "task": task_path,
-        "original_image_size": original_size,
-        "original_image_resolution": original_image_resolution,
+        "original_image_size": list(original_size),
+        "original_image_resolution": list(original_image_resolution),
         "final_image_resolution": IMAGE_SIZE,
         "final_image_size": IMAGE_RESOLUTION,
     }
+    print(output_metadata)
+    with open(os.path.join("./results", task_folder.rstrip("/") + ".json"), "w") as fd:
+        json.dump(output_metadata, fd)
 
     # run optimization for NUM_EPOCHS
     for i in range(NUM_EPOCHS):
@@ -255,11 +266,14 @@ def run_decathalon_step(task_path, use_multiclass=True):
 
 if __name__ == "__main__":
     task_folders = sorted(glob("Task*_*"))
+    task_folders.pop(0)
+    task_folders.pop(task_folders.index("Task04_Hippocampus"))
+    task_folders.pop(task_folders.index("Task05_Prostate"))
     for i, task_folder in enumerate(task_folders):
         try:
             run_decathalon_step(task_folder)
         except:
-            if i:
+            if True:
                 print("failed on %s" % task_folder)
                 import traceback
 
