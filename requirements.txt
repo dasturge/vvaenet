@@ -1,0 +1,9 @@
+h5py
+prettytable
+pydispatch
+numpy
+matplotlib
+scikit-learn
+torch==1.5.1
+torchvision==0.6.1
+eisen==0.0.9
