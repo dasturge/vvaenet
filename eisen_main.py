@@ -21,20 +21,30 @@ from eisen.ops.metrics import DiceMetric
 from eisen.utils import EisenModuleWrapper, EisenDatasetSplitter
 from eisen.utils.artifacts import SaveTorchModelHook
 from eisen.utils.workflows import Training
+from torch.nn.modules.activation import Tanhshrink
+from torch.nn.parallel.data_parallel import DataParallel
 from torch.optim import adam
 from torch.utils.data import DataLoader
 from torch.optim import Adam
 from torchvision.transforms import Compose
 
-from eisen_mods.hooks import PatienceHook, LoggingHook
+from eisen_mods.hooks import PatienceHook, LoggingHook, SaveArtifactsHook
 from eisen_mods.summaries import TensorboardSummaryHook
 from eisen_mods.workflows import Testing
-from model import UVAENet
+from model import UVAENet, ParallelUVAENet
 from losses import KLDivergence, SingleDiceLoss, SingleDiceMetric
 from util import *
 
 
-def run_decathalon_step(task_path, use_multiclass=True):
+def run_decathalon_step(
+    task_path,
+    use_multiclass=True,
+    relu_type="lrelu",
+    variational=True,
+    model_parallel=True,
+    run_shape=None,
+    run_resolution=None,
+):
     """
     executes training for one of the tasks of the medical segmentation decathalon
 
@@ -44,6 +54,13 @@ def run_decathalon_step(task_path, use_multiclass=True):
       If False, just does background/foreground classification for the task, defaults to True
     :type use_multiclass: bool, optional
     """
+    unet_type = "uvaenet" if variational else "unet"
+    if relu_type == "lrelu":
+        activation = nn.LeakyReLU(0.2)
+    elif relu_type == "relu":
+        activation = nn.ReLU()
+    elif relu_type == "rlrelu":
+        activation = nn.RReLU(lower=0.125, upper=1 / 3)
 
     # Defining some constants
     artifacts_dir = "./results/%s" % os.path.basename(task_path)
@@ -67,45 +84,17 @@ def run_decathalon_step(task_path, use_multiclass=True):
     original_image_resolution = example["image_affines"][np.diag_indices(3)]
 
     NUM_EPOCHS = 100
-    BATCH_SIZE = 4
+    BATCH_SIZE = 1 if model_parallel else torch.cuda.device_count()
 
-    MEMORY_LIMIT = 4 * 3932160 / 8.0
-    IMAGE_SIZE = original_size
-    IMAGE_RESOLUTION = original_image_resolution
-    factor = 1
-
-    timer = 0
-    while input_channels * np.product(IMAGE_SIZE) > MEMORY_LIMIT:
-        timer += 1
-        factor += 1
-        if factor <= 3:
-            IMAGE_SIZE = [s // factor for s in original_size]
-            IMAGE_SIZE = [
-                s + 16 - s % 16 if s % 16 else s for s in IMAGE_SIZE
-            ]  # makes convolutions cleaner
-            IMAGE_RESOLUTION = [r * factor for r in original_image_resolution]
-        else:
-            IMAGE_SIZE = [s - 16 if s > 82 else s for s in IMAGE_SIZE]
-            IMAGE_RESOLUTION = [
-                r * round(s1 / s2)
-                for s1, s2, r in zip(
-                    original_size, IMAGE_SIZE, original_image_resolution
-                )
-            ]
-        if timer >= 10:
-            break
-    IMAGE_SIZE = [
-        s + 16 - s % 16 if s % 16 else s for s in IMAGE_SIZE
-    ]  # makes convolutions cleaner
     # image manipulation transforms
     deepcopy_tform = DeepCopy()
     read_tform = LoadNiftiFromFilename(["image", "label"], task_path)
-    image_resample_tform = ResampleNiftiVolumes(["image"], IMAGE_RESOLUTION, "linear")
-    label_resample_tform = ResampleNiftiVolumes(["label"], IMAGE_RESOLUTION, "nearest")
+    image_resample_tform = ResampleNiftiVolumes(["image"], run_resolution, "linear")
+    label_resample_tform = ResampleNiftiVolumes(["label"], run_resolution, "nearest")
     image_to_numpy_tform = NiftiToNumpy(["image"], multichannel=multichannel)
     label_to_numpy_tform = NiftiToNumpy(["label"])
 
-    crop = CropCenteredSubVolumes(fields=["image", "label"], size=IMAGE_SIZE)
+    crop = CropCenteredSubVolumes(fields=["image", "label"], size=run_shape)
 
     map_intensities = MapValues(["image"], min_value=0.0, max_value=1.0)
 
@@ -150,7 +139,12 @@ def run_decathalon_step(task_path, use_multiclass=True):
     )
 
     # construct new segmentation model with random weights
-    base_module = UVAENet(
+    if model_parallel:
+        Net = ParallelUVAENet
+    else:
+        Net = UVAENet
+
+    base_module = Net(
         train_dataset[0]["image"].shape,
         encoder_config={"input_channels": input_channels, "imdim": 3,},
         vae_config={"initial_channels": 4, "imdim": 3,},
@@ -160,8 +154,9 @@ def run_decathalon_step(task_path, use_multiclass=True):
             "final_activation": "softmax" if multiclass else "sigmoid",
         },
     )
-    if torch.cuda.device_count() > 1 and BATCH_SIZE > 1:
-        base_module = nn.DataParallel(base_module)
+    if not model_parallel and torch.cuda.device_count() > 1:
+        base_module = DataParallel(base_module)
+
     model = EisenModuleWrapper(
         module=base_module,
         input_names=["image"],
@@ -213,7 +208,7 @@ def run_decathalon_step(task_path, use_multiclass=True):
         weight=0.1,
     )
     kl_loss = EisenLossWrapper(
-        module=KLDivergence(N=np.product(IMAGE_SIZE)),
+        module=KLDivergence(N=np.product(run_shape)),
         input_names=["mean", "log_variance"],
         output_names=["kl_loss"],
         weight=0.1,
@@ -234,6 +229,18 @@ def run_decathalon_step(task_path, use_multiclass=True):
     )
     # set of hooks logs all artifacts
     hooks = [
+        SaveArtifactsHook(
+            training_workflow.id,
+            "Training",
+            artifacts_dir,
+            "_%s_%s" % (unet_type, relu_type),
+        ),
+        SaveArtifactsHook(
+            training_workflow.id,
+            "Testing",
+            artifacts_dir,
+            "_%s_%s" % (unet_type, relu_type),
+        ),
         LoggingHook(training_workflow.id, "Training", artifacts_dir),
         LoggingHook(testing_workflow.id, "Testing", artifacts_dir),
         TensorboardSummaryHook(training_workflow.id, "Training", artifacts_dir),
@@ -248,11 +255,11 @@ def run_decathalon_step(task_path, use_multiclass=True):
         "task": task_path,
         "original_image_size": list(original_size),
         "original_image_resolution": list(original_image_resolution),
-        "final_image_resolution": IMAGE_SIZE,
-        "final_image_size": IMAGE_RESOLUTION,
+        "final_image_resolution": run_resolution,
+        "final_image_size": run_shape,
     }
     print(output_metadata)
-    with open(os.path.join("./results", task_folder.rstrip("/") + ".json"), "w") as fd:
+    with open(os.path.join("./results", task_path.rstrip("/") + ".json"), "w") as fd:
         json.dump(output_metadata, fd)
 
     # run optimization for NUM_EPOCHS
@@ -265,18 +272,83 @@ def run_decathalon_step(task_path, use_multiclass=True):
 
 
 if __name__ == "__main__":
-    task_folders = sorted(glob("Task*_*"))
-    task_folders.pop(0)
-    task_folders.pop(task_folders.index("Task04_Hippocampus"))
-    task_folders.pop(task_folders.index("Task05_Prostate"))
-    for i, task_folder in enumerate(task_folders):
-        try:
-            run_decathalon_step(task_folder)
-        except:
-            if True:
-                print("failed on %s" % task_folder)
-                import traceback
+    import pandas as pd
 
-                traceback.print_exc()
-            else:
-                raise
+    # get task metadata and prepare run params
+    task_folders = sorted(glob("Task*_*"))
+    metadata_list = []
+    for folder in glob("Task*"):
+        json_file = os.path.join(folder, "dataset.json")
+        with open(json_file) as fd:
+            metadata = json.load(fd)
+        metadata["folder"] = folder
+        metadata_list.append(metadata)
+    df = pd.DataFrame(metadata_list).sort_values(by="folder")
+
+    df["multiclass"] = df["labels"].apply(len) > 2
+    df["multichannel"] = df["modality"].apply(len) > 1
+
+    def get_one_image(folder):
+        train_folder = os.path.join(folder, "imagesTr")
+        image = os.listdir(train_folder)[0]
+        image = os.path.join(train_folder, image)
+        image = os.path.abspath(image)
+        return {"image": image}
+
+    xfm = Compose(
+        [get_one_image, LoadNiftiFromFilename(["image"], "/"), lambda x: x["image"],]
+    )
+    df["nifti"] = df.folder.apply(xfm)
+    df["shape"] = df["nifti"].apply(lambda x: x.header.get_data_shape()[:3])
+    df["resolution"] = df["nifti"].apply(lambda x: x.header.get_zooms()[:3])
+    df["run_shape"] = df["folder"].map(
+        {
+            "Task01_BrainTumour": (160, 192, 128),
+            "Task02_Heart": (320, 320, 120),
+            "Task04_Hippocampus": (35, 51, 34),
+            "Task05_Prostate": (320, 320, 24),
+            "Task06_Lung": [x // 2 - (x // 2 % 16) for x in (512, 512, 531)],
+            "Task07_Pancreas": [x - 48 for x in (512, 512)] + [81],
+            "Task08_HepaticVessel": (512, 512, 35),
+            "Task09_Spleen": (512, 512, 44),
+            "Task10_Colon": [x // 2 - (x // 2 % 16) for x in (512, 512, 100)],
+        }
+    )
+    df["run_resolution"] = df["folder"].map(
+        {
+            "Task01_BrainTumour": (1.0, 1.0, 1.0),
+            "Task02_Heart": (1.25, 1.25, 1.37),
+            "Task04_Hippocampus": (1.0, 1.0, 1.0),
+            "Task05_Prostate": (0.625, 0.625, 3.6),
+            "Task06_Lung": [2.0 * x for x in (0.820312, 0.820312, 0.625)],
+            "Task07_Pancreas": (0.898438, 0.898438, 2.5),
+            "Task08_HepaticVessel": (0.878906, 0.878906, 7.5),
+            "Task09_Spleen": (0.9375, 0.9375, 5.0),
+            "Task10_Colon": [2.0 * x for x in (0.583984, 0.583984, 4.0)],
+        }
+    )
+
+    for i, task_metadata in df.iterrows():
+        for relu_type in ["lrelu", "rlrelu", "relu"]:
+            try:
+                run_decathalon_step(
+                    task_metadata["folder"],
+                    run_shape=task_metadata["run_shape"],
+                    run_resolution=task_metadata["run_resolution"],
+                )
+            except:
+                if task_metadata["folder"] != "Task01_BrainTumour":
+                    print("failed on %s" % task_metadata["folder"])
+                    import traceback
+
+                    traceback.print_exc()
+                else:
+                    raise
+
+
+################# COMPLETION STEPS #######################
+
+# Step 1: complete model construction for various cases
+
+# Step 2: distributed model execution
+

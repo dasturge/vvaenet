@@ -1,4 +1,8 @@
+import os
+
+import h5py
 import numpy as np
+import pandas as pd
 from pydispatch import dispatcher
 from prettytable import PrettyTable
 
@@ -134,7 +138,7 @@ class LoggingHook:
         for dct in message["metrics"]:
             for key in dct.keys():
                 all_metrics_names.append(key)
-                all_metrics.append(dct[key][-1])
+                all_metrics.append(np.mean(dct[key]))
 
         self.table.field_names = (
             ["Phase"]
@@ -149,3 +153,78 @@ class LoggingHook:
         )
 
         print(self.table)
+
+
+class SaveArtifactsHook:
+    """
+    Saves the artifacts from each epoch into an hdf5 file
+    """
+
+    def __init__(
+        self, workflow_id, filename, artifacts_dir, initial_size=10, compression="gzip",
+    ):
+        """
+        :param workflow_id: string containing the workflow id of the workflow being monitored (workflow_instance.id)
+        :type workflow_id: UUID
+        :param filename: name of the output hdf5 and csv files
+        :type filename: str
+        :param artifacts_dir: target folder to save artifacts
+        :type artifacts_dir: str
+        :param initial_size: chunk size of the hdf5 storage file to save intermediate results.
+        :type initial_size: int
+        :param compression: compression type for the hdf5 storage, see h5py package for options.
+        :type compression: str
+        """
+
+        dispatcher.connect(
+            self.end_epoch, signal=EISEN_END_EPOCH_EVENT, sender=workflow_id
+        )
+
+        self.workflow_id = workflow_id
+        self.artifacts_dir = artifacts_dir
+        self.size_increment = initial_size
+        self.current_size = initial_size
+        self.compression = compression
+        os.makedirs(self.artifacts_dir, exist_ok=True)
+        self.log_file = os.path.join(self.artifacts_dir, f"{filename}.csv")
+        self.hdf5_file = os.path.join(self.artifacts_dir, f"{filename}.hdf5")
+        self.repo = h5py.File(self.hdf5_file, "w")
+        self.groups = {
+            "inputs": self.repo.create_group("inputs"),
+            "outputs": self.repo.create_group("outputs"),
+        }
+        self.df = pd.DataFrame()
+
+        self.dataset_refs = {}
+
+        self.init = True
+
+    def end_epoch(self, message):
+        resizing_required = False
+        epoch = message["epoch"]
+        output_dict = {"epoch": epoch}
+        for field in ["losses", "metrics"]:
+            for dct in message[field]:
+                for key, value in dct.items():
+                    output_dict[key] = np.mean(value)
+        for field in ["inputs", "outputs"]:
+            for key, value in message[field].items():
+                if self.init:
+                    self.groups[field].create_dataset(
+                        key,
+                        shape=(self.current_size,) + value.shape,
+                        chunks=True,
+                        maxshape=(None,) + value.shape,
+                        compression=self.compression,
+                    )
+                if epoch >= self.current_size:
+                    resizing_required = True
+                    self.groups[field][key].resize(
+                        size=self.current_size + self.size_increment, axis=0
+                    )
+                self.groups[field][key][epoch, ...] = value
+        if self.init:
+            self.init = False
+        if resizing_required:
+            self.current_size += self.size_increment
+            resizing_required = False

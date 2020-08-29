@@ -11,7 +11,6 @@ UVAENet: constructor for creating full network
 from functools import partial
 
 import numpy as np
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -384,9 +383,21 @@ class SemanticDecoder(nn.Module):
 
 class UVAENet(nn.Module):
     def __init__(
-        self, input_shape, encoder_config=None, vae_config=None, semantic_config=None
+        self,
+        input_shape,
+        encoder_config=None,
+        vae_config=None,
+        semantic_config=None,
+        global_config=None,
     ):
         super().__init__()
+        if global_config:
+            if encoder_config:
+                encoder_config.update(global_config)
+            if vae_config:
+                vae_config.update(global_config)
+            if semantic_config:
+                semantic_config.update(global_config)
         input_shape = (1,) + tuple(input_shape)
         if encoder_config is None:
             encoder_config = {}
@@ -411,3 +422,48 @@ class UVAENet(nn.Module):
         S = self.semantic_decoder(Z, skips)
         # P = torch.argmax(S, dim=1)
         return S, Y, mu, logvar
+
+
+class ParallelUVAENet(nn.Module):
+    def __init__(
+        self,
+        input_shape,
+        encoder_config=None,
+        vae_config=None,
+        semantic_config=None,
+        global_config=None,
+    ):
+        super().__init__()
+        if global_config:
+            if encoder_config:
+                encoder_config.update(global_config)
+            if vae_config:
+                vae_config.update(global_config)
+            if semantic_config:
+                semantic_config.update(global_config)
+        input_shape = (1,) + tuple(input_shape)
+        if encoder_config is None:
+            encoder_config = {}
+        if vae_config is None:
+            vae_config = {}
+        if semantic_config is None:
+            semantic_config = {}
+        self.encoder = Encoder(**encoder_config).to("cuda:0")
+        self.dropout = nn.Dropout3d(p=0.2)
+        bottleneck, *_ = self.encoder(
+            torch.zeros(input_shape, device=next(self.parameters()).device)
+        )
+        vae_config["input_shape"] = bottleneck.shape[2:]
+        vae_config["output_channels"] = input_shape[1]
+        self.vae_decoder = VAEDecoder(**vae_config).to("cuda:1")
+        self.semantic_decoder = SemanticDecoder(**semantic_config).to("cuda:2")
+
+    def forward(self, X):
+        Z, skips = self.encoder(X.to("cuda:0"))
+        skips = [s.to("cuda:2") for s in skips]
+        Z = self.dropout(Z)
+        Y, mu, logvar = self.vae_decoder(Z.to("cuda:1"))
+        S = self.semantic_decoder(Z.to("cuda:2"), skips)
+        # P = torch.argmax(S, dim=1)
+        return S.to("cuda:0"), Y.to("cuda:0"), mu.to("cuda:0"), logvar.to("cuda:0")
+
