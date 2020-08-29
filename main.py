@@ -21,7 +21,6 @@ from eisen.ops.metrics import DiceMetric
 from eisen.utils import EisenModuleWrapper, EisenDatasetSplitter
 from eisen.utils.artifacts import SaveTorchModelHook
 from eisen.utils.workflows import Training
-from torch.nn.modules.activation import Tanhshrink
 from torch.nn.parallel.data_parallel import DataParallel
 from torch.optim import adam
 from torch.utils.data import DataLoader
