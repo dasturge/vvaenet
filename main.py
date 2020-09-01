@@ -42,11 +42,12 @@ def generate_parser():
 def run_decathalon_step(
     task_path,
     use_multiclass=True,
-    relu_type="lrelu",
-    vnet_type="vvaenet",
     model_parallel=True,
     run_shape=None,
     run_resolution=None,
+    experiment_name="vvaenet",
+    vnet_type="vvaenet",
+    relu_type="relu",
 ):
     """
     executes training for one of the tasks of the medical segmentation decathalon
@@ -254,25 +255,17 @@ def run_decathalon_step(
         model=model, data_loader=data_loader_test, metrics=metrics, gpu=True
     )
     # set of hooks logs all artifacts
-    experiment_suffix = "_%s_%s" % (vnet_type, relu_type)
-    experiment_dir = os.path.join(artifacts_dir, experiment_suffix)
+    experiment_dir = os.path.join(artifacts_dir, experiment_name)
     os.makedirs(experiment_dir, exist_ok=True)
     hooks = [
-        """SaveArtifactsHook(
-            training_workflow.id,
-            experiment_suffix,
-            artifacts_dir,
-        )""",
-        SaveArtifactsHook(training_workflow.id, experiment_suffix, artifacts_dir,),
         LoggingHook(training_workflow.id, "Training", experiment_dir),
         LoggingHook(testing_workflow.id, "Testing", experiment_dir),
         TensorboardSummaryHook(training_workflow.id, "Training", experiment_dir),
         TensorboardSummaryHook(testing_workflow.id, "Testing", experiment_dir),
-        SaveTorchModelHook(
-            testing_workflow.id, "Testing", experiment_dir, select_best_loss=False
-        ),
     ]
-    patience = PatienceHook(testing_workflow.id, 10, select_best_loss=False)
+    save_model_hook = SaveTorchModelHook(
+        testing_workflow.id, "Testing", experiment_dir, select_best_loss=False
+    )
 
     output_metadata = {
         "task": task_path,
@@ -286,12 +279,15 @@ def run_decathalon_step(
         json.dump(output_metadata, fd)
 
     # run optimization for NUM_EPOCHS
-    for i in range(NUM_EPOCHS):
-        if patience.is_stop():
-            print("early stopping triggered on epoch %s" % (i - 1))
-            break
+    for _ in range(NUM_EPOCHS):
         training_workflow.run()
         testing_workflow.run()
+
+    SaveArtifactsHook(training_workflow.id, experiment_name, artifacts_dir)
+    model.module.load_state_dict(
+        torch.load(os.path.join(save_model_hook.artifacts_dir, "model.pt"))
+    )
+    testing_workflow.run()
 
     del hooks
 
