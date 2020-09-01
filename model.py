@@ -381,7 +381,7 @@ class SemanticDecoder(nn.Module):
         return out
 
 
-class UVAENet(nn.Module):
+class VVAENet(nn.Module):
     def __init__(
         self,
         input_shape,
@@ -424,7 +424,7 @@ class UVAENet(nn.Module):
         return S, Y, mu, logvar
 
 
-class ParallelUVAENet(nn.Module):
+class ParallelVVAENet(nn.Module):
     def __init__(
         self,
         input_shape,
@@ -466,4 +466,59 @@ class ParallelUVAENet(nn.Module):
         S = self.semantic_decoder(Z.to("cuda:2"), skips)
         # P = torch.argmax(S, dim=1)
         return S.to("cuda:0"), Y.to("cuda:0"), mu.to("cuda:0"), logvar.to("cuda:0")
+
+
+class VNet(nn.Module):
+    """
+    This is not VNet from Milletari et. al.  It is VVAENet minus the variational autoencoder.
+    """
+
+    def __init__(
+        self,
+        input_shape,
+        encoder_config=None,
+        semantic_config=None,
+        global_config=None,
+        **_,  # permit vae_config kwarg to be passed in.
+    ):
+        super().__init__()
+        if global_config:
+            if encoder_config:
+                encoder_config.update(global_config)
+            if semantic_config:
+                semantic_config.update(global_config)
+        input_shape = (1,) + tuple(input_shape)
+        if encoder_config is None:
+            encoder_config = {}
+        if semantic_config is None:
+            semantic_config = {}
+        self.encoder = Encoder(**encoder_config)
+        self.dropout = nn.Dropout3d(p=0.2)
+        self.semantic_decoder = SemanticDecoder(**semantic_config)
+
+    def forward(self, X):
+        Z, skips = self.encoder(X)
+        Z = self.dropout(Z)
+        S = self.semantic_decoder(Z, skips)
+        return S
+
+
+class VNetParallel(VNet):
+    """
+    This is not VNet from Milletari et. al.  It is VVAENet minus the variational autoencoder.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.encoder = self.encoder.to("cuda:0")
+        self.semantic_decoder = self.semantic_decoder.to("cuda:1")
+
+    def forward(self, X):
+        X.to("cuda:0")
+        Z, skips = self.encoder(X)
+        Z = Z.to("cuda:1")
+        skips = [s.to("cuda:1") for s in skips]
+        Z = self.dropout(Z)
+        S = self.semantic_decoder(Z, skips)
+        return S.to("cuda:0")
 

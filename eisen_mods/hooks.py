@@ -188,16 +188,18 @@ class SaveArtifactsHook:
         os.makedirs(self.artifacts_dir, exist_ok=True)
         self.log_file = os.path.join(self.artifacts_dir, f"{filename}.csv")
         self.hdf5_file = os.path.join(self.artifacts_dir, f"{filename}.hdf5")
+        if os.path.exists(self.hdf5_file):
+            os.remove(self.hdf5_file)
         self.repo = h5py.File(self.hdf5_file, "w")
         self.groups = {
             "inputs": self.repo.create_group("inputs"),
             "outputs": self.repo.create_group("outputs"),
         }
         self.df = pd.DataFrame()
-
-        self.dataset_refs = {}
-
         self.init = True
+
+    def __del__(self):
+        self.repo.close()
 
     def end_epoch(self, message):
         resizing_required = False
@@ -207,6 +209,7 @@ class SaveArtifactsHook:
             for dct in message[field]:
                 for key, value in dct.items():
                     output_dict[key] = np.mean(value)
+        self.df = self.df.append(output_dict, ignore_index=True)
         for field in ["inputs", "outputs"]:
             for key, value in message[field].items():
                 if self.init:
@@ -228,3 +231,4 @@ class SaveArtifactsHook:
         if resizing_required:
             self.current_size += self.size_increment
             resizing_required = False
+        self.df.to_csv(self.log_file)

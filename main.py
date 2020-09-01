@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 from glob import glob
@@ -22,7 +23,6 @@ from eisen.utils import EisenModuleWrapper, EisenDatasetSplitter
 from eisen.utils.artifacts import SaveTorchModelHook
 from eisen.utils.workflows import Training
 from torch.nn.parallel.data_parallel import DataParallel
-from torch.optim import adam
 from torch.utils.data import DataLoader
 from torch.optim import Adam
 from torchvision.transforms import Compose
@@ -30,16 +30,20 @@ from torchvision.transforms import Compose
 from eisen_mods.hooks import PatienceHook, LoggingHook, SaveArtifactsHook
 from eisen_mods.summaries import TensorboardSummaryHook
 from eisen_mods.workflows import Testing
-from model import UVAENet, ParallelUVAENet
+from model import VNet, VNetParallel, VVAENet, ParallelVVAENet
 from losses import KLDivergence, SingleDiceLoss, SingleDiceMetric
 from util import *
+
+
+def generate_parser():
+    pass  # @TODO this will allow for toggling model parallelism and artifact saving parameters
 
 
 def run_decathalon_step(
     task_path,
     use_multiclass=True,
     relu_type="lrelu",
-    variational=True,
+    vnet_type="vvaenet",
     model_parallel=True,
     run_shape=None,
     run_resolution=None,
@@ -53,13 +57,14 @@ def run_decathalon_step(
       If False, just does background/foreground classification for the task, defaults to True
     :type use_multiclass: bool, optional
     """
-    unet_type = "uvaenet" if variational else "unet"
     if relu_type == "lrelu":
         activation = nn.LeakyReLU(0.2)
     elif relu_type == "relu":
         activation = nn.ReLU()
     elif relu_type == "rlrelu":
         activation = nn.RReLU(lower=0.125, upper=1 / 3)
+    else:
+        raise ValueError("activation type: %s not supported" % relu_type)
 
     # Defining some constants
     artifacts_dir = "./results/%s" % os.path.basename(task_path)
@@ -121,6 +126,7 @@ def run_decathalon_step(
     tform = Compose(tform_list)
 
     # create a dataset from the training set of the MSD dataset
+    np.random.seed(0)
     dataset = MSDDataset(task_path, metadata_json, "training", transform=None)
     splitter = EisenDatasetSplitter(
         0.8, 0.2, 0.0, transform_train=tform, transform_valid=tform
@@ -138,18 +144,40 @@ def run_decathalon_step(
     )
 
     # construct new segmentation model with random weights
-    if model_parallel:
-        Net = ParallelUVAENet
+    if vnet_type == "vvaenet":
+        if model_parallel:
+            Net = ParallelVVAENet
+        else:
+            Net = VVAENet
+        model_output_names = [
+            "segmentation",
+            "reconstruction",
+            "mean",
+            "log_variance",
+        ]
+
+    elif vnet_type == "vnet":
+        if model_parallel:
+            Net = VNetParallel
+        else:
+            Net = VNet
+        model_output_names = ["segmentation"]
+
     else:
-        Net = UVAENet
+        raise ValueError("vnet_type not recognized: %s" % vnet_type)
 
     base_module = Net(
         train_dataset[0]["image"].shape,
-        encoder_config={"input_channels": input_channels, "imdim": 3,},
-        vae_config={"initial_channels": 4, "imdim": 3,},
+        encoder_config={
+            "input_channels": input_channels,
+            "imdim": 3,
+            "activation": activation,
+        },
+        vae_config={"initial_channels": 4, "imdim": 3, "activation": activation,},
         semantic_config={
             "output_channels": output_channels if multiclass else 1,
             "imdim": 3,
+            "activation": activation,
             "final_activation": "softmax" if multiclass else "sigmoid",
         },
     )
@@ -157,9 +185,7 @@ def run_decathalon_step(
         base_module = DataParallel(base_module)
 
     model = EisenModuleWrapper(
-        module=base_module,
-        input_names=["image"],
-        output_names=["segmentation", "reconstruction", "mean", "log_variance",],
+        module=base_module, input_names=["image"], output_names=model_output_names,
     )
 
     # define model 3 model losses: dice, reconstruction, and kl divergence.
@@ -217,7 +243,8 @@ def run_decathalon_step(
     # define eisen workflows for training and testing
     training_workflow = Training(
         model=model,
-        losses=dice_losses + [reconstruction_loss, kl_loss],
+        losses=dice_losses
+        + ([reconstruction_loss, kl_loss] if vnet_type == "vvaenet" else []),
         data_loader=data_loader_train,
         optimizer=optimizer,
         metrics=metrics,
@@ -227,25 +254,22 @@ def run_decathalon_step(
         model=model, data_loader=data_loader_test, metrics=metrics, gpu=True
     )
     # set of hooks logs all artifacts
+    experiment_suffix = "_%s_%s" % (vnet_type, relu_type)
+    experiment_dir = os.path.join(artifacts_dir, experiment_suffix)
+    os.makedirs(experiment_dir, exist_ok=True)
     hooks = [
-        SaveArtifactsHook(
+        """SaveArtifactsHook(
             training_workflow.id,
-            "Training",
+            experiment_suffix,
             artifacts_dir,
-            "_%s_%s" % (unet_type, relu_type),
-        ),
-        SaveArtifactsHook(
-            training_workflow.id,
-            "Testing",
-            artifacts_dir,
-            "_%s_%s" % (unet_type, relu_type),
-        ),
-        LoggingHook(training_workflow.id, "Training", artifacts_dir),
-        LoggingHook(testing_workflow.id, "Testing", artifacts_dir),
-        TensorboardSummaryHook(training_workflow.id, "Training", artifacts_dir),
-        TensorboardSummaryHook(testing_workflow.id, "Testing", artifacts_dir),
+        )""",
+        SaveArtifactsHook(training_workflow.id, experiment_suffix, artifacts_dir,),
+        LoggingHook(training_workflow.id, "Training", experiment_dir),
+        LoggingHook(testing_workflow.id, "Testing", experiment_dir),
+        TensorboardSummaryHook(training_workflow.id, "Training", experiment_dir),
+        TensorboardSummaryHook(testing_workflow.id, "Testing", experiment_dir),
         SaveTorchModelHook(
-            testing_workflow.id, "Testing", artifacts_dir, select_best_loss=False
+            testing_workflow.id, "Testing", experiment_dir, select_best_loss=False
         ),
     ]
     patience = PatienceHook(testing_workflow.id, 10, select_best_loss=False)
@@ -268,6 +292,8 @@ def run_decathalon_step(
             break
         training_workflow.run()
         testing_workflow.run()
+
+    del hooks
 
 
 if __name__ == "__main__":
@@ -328,26 +354,18 @@ if __name__ == "__main__":
     )
 
     for i, task_metadata in df.iterrows():
-        for relu_type in ["lrelu", "rlrelu", "relu"]:
-            try:
-                run_decathalon_step(
-                    task_metadata["folder"],
-                    run_shape=task_metadata["run_shape"],
-                    run_resolution=task_metadata["run_resolution"],
-                )
-            except:
-                if task_metadata["folder"] != "Task01_BrainTumour":
-                    print("failed on %s" % task_metadata["folder"])
-                    import traceback
+        try:
+            run_decathalon_step(
+                task_metadata["folder"],
+                model_parallel=True,
+                run_shape=task_metadata["run_shape"],
+                run_resolution=task_metadata["run_resolution"],
+            )
+        except:
+            if task_metadata["folder"] != "Task01_BrainTumour":
+                print("failed on %s" % task_metadata["folder"])
+                import traceback
 
-                    traceback.print_exc()
-                else:
-                    raise
-
-
-################# COMPLETION STEPS #######################
-
-# Step 1: complete model construction for various cases
-
-# Step 2: distributed model execution
-
+                traceback.print_exc()
+            else:
+                raise  # raises if it fails on the first Step
