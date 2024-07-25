@@ -5,6 +5,6 @@ pydispatch
 numpy
 matplotlib
 scikit-learn
-torch==1.5.1
+torch==2.2.0
 torchvision==0.6.1
 eisen==0.0.9
